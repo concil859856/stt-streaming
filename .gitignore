@@ -1,0 +1,27 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# virtualenvs
+.venv/
+venv/
+env/
+
+# test / build artifacts
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# local config / secrets
+.env
+
+# runtime
+logs/
+*.log
+
+# sample audio outputs (fixtures live under tests/fixtures and are committed explicitly)
+*.wav
+
+.DS_Store

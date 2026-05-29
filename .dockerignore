@@ -1,0 +1,23 @@
+.git
+.github
+.gitignore
+.dockerignore
+
+# local venvs / caches
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# not needed in the runtime image
+tests/
+scripts/
+examples/
+README.md
+
+.DS_Store
+*.log
+logs/

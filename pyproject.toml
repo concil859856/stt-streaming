@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stt-streaming"
+version = "0.1.0"
+description = "Streaming STT pod for the Vocence ops fleet (NVIDIA Parakeet TDT)"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "websockets>=12",
+    "pydantic>=2.5",
+    "numpy>=1.26,<2.0",
+    "soundfile>=0.12",
+    "librosa>=0.10",
+    # NeMo pinned — Parakeet TDT v3 inference path
+    "nemo_toolkit[asr]==2.0.0",
+    # torch version is resolved by nemo_toolkit
+    "torch",
+    "silero-vad>=5.0",
+    "huggingface_hub>=0.25",
+    "prometheus_client>=0.20",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "httpx",
+]
+
+[project.scripts]
+stt-streaming = "stt_streaming.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
