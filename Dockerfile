@@ -38,12 +38,15 @@ RUN printf "torch==2.6.0\ntorchaudio==2.6.0\nnumpy>=1.26,<2.0\n" > /tmp/constrai
 # build-time smoke test
 RUN python3 -c "import torch; import nemo.collections.asr; from stt_streaming import server; print('OK')"
 
-# bake model weights
-RUN python3 -c "from huggingface_hub import snapshot_download; snapshot_download('nvidia/parakeet-tdt-0.6b-v3', local_dir='/cache/models/parakeet')"
+# Model is downloaded on first start to /cache/models (mount a volume there
+# in production to persist across restarts). Baking added 3+ GB and pushed
+# the unpacked image past the disk budget on our shared 97 GB GPU box.
+VOLUME ["/cache/models", "/cache/hf"]
 
 EXPOSE 8117
 
-HEALTHCHECK --interval=10s --timeout=5s --retries=3 --start-period=120s \
+# Longer start-period covers first-boot model download (~3 GB).
+HEALTHCHECK --interval=15s --timeout=5s --retries=3 --start-period=300s \
     CMD curl -fsS http://localhost:8117/healthz | grep -q '"status":"ok"'
 
 CMD ["stt-streaming"]

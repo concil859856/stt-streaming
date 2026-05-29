@@ -38,12 +38,16 @@ class ParakeetModel:
         self._lock = threading.Lock()
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        logger.info("Loading NeMo ASR model from %s", model_dir)
-        # Prefer restore_from for a local .nemo snapshot; fall back to from_pretrained on a dir
-        try:
+        logger.info("Loading NeMo ASR model: %s (device=%s)", model_dir, self._device)
+        # Two paths:
+        #  - local .nemo file path (restore_from)
+        #  - HF model id like "nvidia/parakeet-tdt-0.6b-v3" (from_pretrained downloads to HF_HOME)
+        import os
+        if os.path.exists(model_dir) and os.path.isfile(model_dir):
             self.model = ASRModel.restore_from(restore_path=model_dir, map_location=self._device)
-        except Exception:
-            self.model = ASRModel.from_pretrained(model_name=model_dir, map_location=self._device)
+        else:
+            model_id = os.environ.get("ASR_MODEL", "nvidia/parakeet-tdt-0.6b-v3")
+            self.model = ASRModel.from_pretrained(model_name=model_id, map_location=self._device)
 
         self.model = self.model.to(self._device)
         self.model.eval()
