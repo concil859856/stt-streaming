@@ -12,6 +12,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "websockets>=12",
+    "python-multipart>=0.0.9",
     "pydantic>=2.5",
     "numpy>=1.26,<2.0",
     "soundfile>=0.12",
