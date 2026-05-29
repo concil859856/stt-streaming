@@ -25,13 +25,13 @@ RUN pip install --upgrade pip setuptools wheel
 
 # torch first from cu126 index
 RUN pip install --index-url https://download.pytorch.org/whl/cu126 \
-    torch==2.5.1 torchaudio==2.5.1
+    torch==2.6.0 torchaudio==2.6.0
 
 COPY pyproject.toml ./
 COPY src/ ./src/
 
 # constraint file to keep torch pinned during package resolution
-RUN printf "torch==2.5.1\ntorchaudio==2.5.1\n" > /tmp/constraints.txt \
+RUN printf "torch==2.6.0\ntorchaudio==2.6.0\n" > /tmp/constraints.txt \
     && pip install -c /tmp/constraints.txt .
 
 # build-time smoke test
