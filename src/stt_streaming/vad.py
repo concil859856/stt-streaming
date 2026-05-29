@@ -20,12 +20,22 @@ class SileroVAD:
         except Exception as e:  # pragma: no cover - exercised only without silero installed
             log.warning("silero-vad unavailable (%s); falling back to RMS energy threshold", e)
 
-    def is_speech(self, audio_chunk: np.ndarray, sample_rate: int = 16000) -> bool:
+    def reset_state(self):
+        return None
+
+    def is_speech(self, audio_chunk: np.ndarray, state=None, sample_rate: int = 16000):
+        if isinstance(state, int):
+            sample_rate = state
+            state = None
+        result = self._is_speech_inner(audio_chunk, sample_rate)
+        # ws.py expects (bool, new_state); internal callers ignore the tuple via [0]
+        return result, state
+
+    def _is_speech_inner(self, audio_chunk: np.ndarray, sample_rate: int = 16000) -> bool:
         if self._model is None:
             return _rms_is_speech(audio_chunk)
         try:
-            import torch  # local import — only needed when silero is loaded
-
+            import torch
             tensor = torch.from_numpy(_to_float32(audio_chunk))
             ts = self._get_speech_timestamps(tensor, self._model, sampling_rate=sample_rate)
             return len(ts) > 0

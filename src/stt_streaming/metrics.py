@@ -88,3 +88,21 @@ def inflight_dec() -> None:
 
 def export_metrics() -> bytes:
     return generate_latest()
+
+
+def get_inflight() -> int:
+    return int(_inflight._value.get())
+
+
+# Aliases used by ws.py (workflow agents diverged on naming — keep both APIs working)
+def inc_inflight() -> None: _inflight.inc()
+def dec_inflight() -> None: _inflight.dec()
+def inc_request(status: str = "ok") -> None: _requests_total.labels(status=status).inc()
+def add_audio_ms(ms: float) -> None: _audio_ms_total.inc(max(0.0, ms))
+def add_bytes_received(n: int) -> None: _bytes_received_total.inc(max(0, n))
+def observe_duration_ms(ms: float) -> None:
+    _duration_ms_sum.inc(max(0.0, ms))
+    _duration_ms_count.inc()
+def observe_ttft_ms(ms: float) -> None:
+    _ttft_ms_sum.inc(max(0.0, ms))
+    _ttft_ms_count.inc()

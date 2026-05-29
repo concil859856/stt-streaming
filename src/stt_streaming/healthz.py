@@ -61,7 +61,7 @@ def _gpu_info() -> Optional[Dict[str, Any]]:
         return None
 
 
-def get_health_state() -> Dict[str, Any]:
+def get_health_state(config: Any = None) -> Dict[str, Any]:
     out: Dict[str, Any] = {
         "status": _state.status,
         "service": "stt-streaming",
