@@ -105,3 +105,7 @@ def _rms_segments(audio: np.ndarray, sample_rate: int) -> List[Tuple[int, int, b
     if cur_speech is not None:
         out.append((_samples_to_ms(cur_start, sample_rate), _samples_to_ms(n, sample_rate), cur_speech))
     return out
+
+
+def load_vad() -> SileroVAD:
+    return SileroVAD()
