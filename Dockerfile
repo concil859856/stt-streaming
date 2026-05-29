@@ -32,8 +32,8 @@ COPY pyproject.toml ./
 COPY src/ ./src/
 
 # constraint file to keep torch pinned during package resolution
-RUN printf "torch==2.6.0\ntorchaudio==2.6.0\n" > /tmp/constraints.txt \
-    && pip install -c /tmp/constraints.txt .
+RUN printf "torch==2.6.0\ntorchaudio==2.6.0\nnumpy>=1.26,<2.0\n" > /tmp/constraints.txt \
+    && pip install --prefer-binary -c /tmp/constraints.txt .
 
 # build-time smoke test
 RUN python3 -c "import torch; import nemo.collections.asr; from stt_streaming import server; print('OK')"
