@@ -219,14 +219,18 @@ async def _session_loop(
         if "bytes" in msg and msg["bytes"] is not None:
             frame = msg["bytes"]
             sample_count = len(frame) // 2
-            if len(frame) % 2 != 0 or sample_count < MIN_FRAME_SAMPLES:
-                await _send_error(ws, "audio_format_error", "frame too small or unaligned")
+            # Empty or odd-length frames are malformed PCM16 and unrecoverable.
+            if len(frame) == 0 or len(frame) % 2 != 0:
+                await _send_error(ws, "audio_format_error", "frame empty or unaligned")
                 await _close(ws, CLOSE_BAD_REQUEST, "bad frame")
                 return
             if sample_count > MAX_FRAME_SAMPLES:
                 await _send_error(ws, "audio_format_error", "frame too large")
                 await _close(ws, CLOSE_FRAME_TOO_LARGE, "frame too large")
                 return
+            # Frames smaller than MIN_FRAME_SAMPLES (e.g. a real-time client's final
+            # remainder chunk) are still valid audio — buffer them rather than killing
+            # the session over a short tail.
 
             sess.bytes_received += len(frame)
             chunk = _pcm16_to_float32(frame)
@@ -329,11 +333,18 @@ async def _finalize_utterance(
     if sess.utterance_buffer.shape[0] == 0 and not sess.last_partial_text:
         return
     loop = asyncio.get_running_loop()
-    try:
-        text = await loop.run_in_executor(None, model.finalize, sess.model_state)
-    except Exception:
-        logger.exception("finalize failed")
-        text = sess.last_partial_text
+    text = sess.last_partial_text
+    if sess.utterance_buffer.shape[0] > 0:
+        # Re-decode the caller-owned buffer directly. This is correct even when no
+        # partial was ever emitted (e.g. enable_partials=False), where the model
+        # state would otherwise hold no audio.
+        try:
+            text = await loop.run_in_executor(
+                None, model.transcribe_window, sess.utterance_buffer
+            )
+        except Exception:
+            logger.exception("finalize failed")
+            text = sess.last_partial_text
 
     if not text and not force:
         return
