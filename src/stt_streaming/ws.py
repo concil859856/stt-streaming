@@ -303,15 +303,15 @@ async def _session_loop(
 async def _emit_partial(ws: WebSocket, model: ParakeetModel, sess: WSSession) -> None:
     loop = asyncio.get_running_loop()
     audio = sess.utterance_buffer
-    state = sess.model_state
     try:
-        text, new_state = await loop.run_in_executor(
-            None, model.transcribe_chunk, audio, state
-        )
+        # Best-effort: returns None if the GPU is busy, in which case we drop this
+        # partial tick rather than queueing work behind the other live sessions.
+        text = await loop.run_in_executor(None, model.try_transcribe_window, audio)
     except Exception:
-        logger.exception("transcribe_chunk failed")
+        logger.exception("partial decode failed")
         return
-    sess.model_state = new_state
+    if text is None:
+        return
     if not text or text == sess.last_partial_text:
         return
     sess.last_partial_text = text

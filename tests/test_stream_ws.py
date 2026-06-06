@@ -40,6 +40,10 @@ class _StubModel:
         words = int(audio.shape[0] / SR / 0.2)  # ~1 token per 200 ms of audio
         return " ".join(["hello"] * words)
 
+    def try_transcribe_window(self, audio):
+        # The stub is never "busy"; mirror the real best-effort partial path.
+        return self.transcribe_window(audio)
+
     def transcribe_chunk(self, audio, state):
         text = self.transcribe_window(audio)
         state.last_text = text

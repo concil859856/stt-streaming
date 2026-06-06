@@ -115,17 +115,51 @@ class ParakeetModel:
         except Exception:
             logger.exception("Warm-up failed (continuing)")
 
+    def _bound(self, audio: np.ndarray) -> Optional[np.ndarray]:
+        if audio is None or audio.shape[0] == 0:
+            return None
+        if audio.dtype != np.float32:
+            audio = audio.astype(np.float32)
+        if audio.shape[0] > _FALLBACK_CONTEXT_SAMPLES:
+            audio = audio[-_FALLBACK_CONTEXT_SAMPLES:]
+        return audio
+
+    def try_transcribe_window(self, audio: np.ndarray) -> Optional[str]:
+        """Best-effort partial decode: returns the transcript, or ``None`` if the
+        GPU is already busy.
+
+        Each NeMo ``transcribe`` call costs a fixed ~55 ms (Python/dataloader
+        overhead, independent of window length), so the lock-serialized model
+        caps out around ~18 calls/s. Partials are disposable — if we blocked
+        here, ticks from many concurrent sessions would queue without bound and
+        starve the event loop (uvicorn's WS keepalive then drops the socket).
+        Skipping a busy tick keeps the loop responsive; the next frame retries.
+        """
+        bounded = self._bound(audio)
+        if bounded is None:
+            return ""
+        if not self._lock.acquire(blocking=False):
+            return None
+        try:
+            return self._infer(bounded)
+        finally:
+            self._lock.release()
+
     def _run_transcribe(self, audio: np.ndarray) -> str:
-        """Underlying NeMo call. Holds the GPU lock for the duration."""
+        """Underlying NeMo call. Holds the GPU lock for the duration (blocking)."""
+        with self._lock:
+            return self._infer(audio)
+
+    def _infer(self, audio: np.ndarray) -> str:
+        """Run NeMo transcribe on one window. Caller must hold ``self._lock``."""
         import torch
 
-        with self._lock:
-            with torch.inference_mode():
-                # NeMo 2.0 transcribe accepts a list of numpy arrays in newer builds
-                try:
-                    out = self.model.transcribe([audio], batch_size=1, verbose=False)
-                except TypeError:
-                    out = self.model.transcribe([audio], batch_size=1)
+        with torch.inference_mode():
+            # NeMo 2.0 transcribe accepts a list of numpy arrays in newer builds
+            try:
+                out = self.model.transcribe([audio], batch_size=1, verbose=False)
+            except TypeError:
+                out = self.model.transcribe([audio], batch_size=1)
         return _extract_text(out)
 
 
