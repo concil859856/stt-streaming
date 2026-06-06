@@ -31,6 +31,8 @@ CLOSE_FRAME_TOO_LARGE = 4413
 CLOSE_TOO_MANY = 4429
 
 _START_TIMEOUT_S = 5.0
+# How much pre-speech audio to retain as onset context while waiting for speech.
+_PRESPEECH_LOOKBACK_S = 0.3
 
 
 @dataclass
@@ -52,6 +54,10 @@ class WSSession:
     utterance_buffer: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
     utterance_start_ms: int = 0
     silence_run_ms: int = 0
+    # Whether the current utterance buffer contains VAD-confirmed speech. We only
+    # ever finalize buffers that do — committing pure silence/quiet-noise makes the
+    # model hallucinate filler ("yeah", "thank you", "uh huh").
+    has_speech: bool = False
 
     session_start_monotonic: float = field(default_factory=time.monotonic)
     first_partial_emitted: bool = False
@@ -110,8 +116,10 @@ async def handle_session(
         return
 
     api_key = getattr(config, "api_key", None)
-    header_key = websocket.headers.get("x-api-key")
-    if api_key and header_key != api_key:
+    # Browsers cannot set custom headers on a WS upgrade, so the reference JS
+    # client passes the key as a ?api_key= query param. Accept either.
+    presented_key = websocket.headers.get("x-api-key") or websocket.query_params.get("api_key")
+    if api_key and presented_key != api_key:
         await websocket.close(code=CLOSE_UNAUTHORIZED, reason="unauthorized")
         metrics.inc_request("error")
         return
@@ -253,6 +261,7 @@ async def _session_loop(
                         "audio_ms_consumed": sess.audio_ms_consumed,
                     })
                 sess.silence_run_ms = 0
+                sess.has_speech = True
             else:
                 sess.silence_run_ms += chunk_ms
                 if sess.vad_events:
@@ -261,6 +270,14 @@ async def _session_loop(
                         "audio_ms_consumed": sess.audio_ms_consumed,
                         "silence_ms": sess.silence_run_ms,
                     })
+                # Before any speech, don't let leading silence pile up in the
+                # buffer (unbounded growth + something to wrongly finalize). Keep
+                # only a short lookback so the utterance still has onset context.
+                if not sess.has_speech:
+                    keep = int(_PRESPEECH_LOOKBACK_S * SAMPLE_RATE)
+                    if sess.utterance_buffer.shape[0] > keep:
+                        sess.utterance_buffer = sess.utterance_buffer[-keep:]
+                    sess.utterance_start_ms = sess.audio_ms_consumed
 
             # Partial throttling
             now = time.monotonic()
@@ -273,8 +290,12 @@ async def _session_loop(
                 await _emit_partial(ws, model, sess)
                 sess.last_partial_ts = now
 
-            # Silence commit
-            if sess.silence_run_ms >= silence_commit_ms and sess.utterance_buffer.shape[0] > 0:
+            # Silence commit — only end an utterance that actually had speech.
+            if (
+                sess.has_speech
+                and sess.silence_run_ms >= silence_commit_ms
+                and sess.utterance_buffer.shape[0] > 0
+            ):
                 await _finalize_utterance(ws, model, sess)
 
             continue
@@ -327,10 +348,23 @@ async def _emit_partial(ws: WebSocket, model: ParakeetModel, sess: WSSession) ->
     })
 
 
+def _reset_utterance(sess: WSSession, end_ms: int) -> None:
+    sess.utterance_buffer = np.zeros(0, dtype=np.float32)
+    sess.utterance_start_ms = end_ms
+    sess.silence_run_ms = 0
+    sess.last_partial_text = ""
+    sess.has_speech = False
+
+
 async def _finalize_utterance(
     ws: WebSocket, model: ParakeetModel, sess: WSSession, force: bool = False
 ) -> None:
     if sess.utterance_buffer.shape[0] == 0 and not sess.last_partial_text:
+        return
+    # Never finalize a buffer with no VAD-confirmed speech — the model would
+    # hallucinate filler on the silence/noise. Drop it silently and move on.
+    if not sess.has_speech and not sess.last_partial_text:
+        _reset_utterance(sess, sess.audio_ms_consumed)
         return
     loop = asyncio.get_running_loop()
     text = sess.last_partial_text
@@ -361,8 +395,5 @@ async def _finalize_utterance(
     })
 
     # Reset utterance state
-    sess.utterance_buffer = np.zeros(0, dtype=np.float32)
-    sess.utterance_start_ms = end_ms
-    sess.silence_run_ms = 0
-    sess.last_partial_text = ""
+    _reset_utterance(sess, end_ms)
     sess.model_state = model.reset_state()

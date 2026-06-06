@@ -64,12 +64,32 @@ class _StubVad:
         return True, state
 
 
+class _SilentVad:
+    """Never detects speech — models a quiet mic / silence / background noise."""
+
+    def reset_state(self):
+        return None
+
+    def is_speech(self, chunk, state=None, sample_rate=SR):
+        return False, state
+
+
 @pytest.fixture()
 def client(monkeypatch):
     monkeypatch.setenv("ASR_API_KEY", API_KEY)
     monkeypatch.setenv("ASR_PARTIAL_INTERVAL_MS", "0")  # emit on every speech frame
     monkeypatch.setattr(server, "ParakeetModel", _StubModel)
     monkeypatch.setattr(server, "load_vad", lambda: _StubVad())
+    with TestClient(server.app) as c:
+        yield c
+
+
+@pytest.fixture()
+def client_silent(monkeypatch):
+    monkeypatch.setenv("ASR_API_KEY", API_KEY)
+    monkeypatch.setenv("ASR_INTERNAL_SILENCE_MS", "200")  # would commit fast if it could
+    monkeypatch.setattr(server, "ParakeetModel", _StubModel)
+    monkeypatch.setattr(server, "load_vad", lambda: _SilentVad())
     with TestClient(server.app) as c:
         yield c
 
@@ -140,6 +160,29 @@ def test_bad_api_key_rejected(client):
         with client.websocket_connect("/v1/stream", headers={"x-api-key": "wrong"}):
             pass
     assert exc.value.code == 4401
+
+
+def test_no_speech_emits_no_final(client_silent):
+    """Audio that the VAD never flags as speech (silence / quiet noise) must not
+    be finalized — committing it makes the model hallucinate filler words."""
+    pcm = _speech_pcm(2.0)
+    chunk = 320 * 2
+    with client_silent.websocket_connect("/v1/stream", headers={"x-api-key": API_KEY}) as ws:
+        ws.send_text(json.dumps({"type": "start", "sample_rate": SR, "encoding": "pcm_s16le"}))
+        assert json.loads(ws.receive_text())["type"] == "ready"
+        for i in range(0, len(pcm), chunk):
+            ws.send_bytes(pcm[i:i + chunk])
+        ws.send_text(json.dumps({"type": "close"}))
+        msgs, code = _drain(ws)
+    assert code == 1000
+    assert not [m for m in msgs if m["type"] == "final"], f"silence produced a final: {msgs}"
+
+
+def test_query_param_api_key_accepted(client):
+    """Browsers can't set WS headers, so the key may arrive as ?api_key=."""
+    with client.websocket_connect(f"/v1/stream?api_key={API_KEY}") as ws:
+        ws.send_text(json.dumps({"type": "start", "sample_rate": SR, "encoding": "pcm_s16le"}))
+        assert json.loads(ws.receive_text())["type"] == "ready"
 
 
 def test_odd_frame_rejected(client):
