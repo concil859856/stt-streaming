@@ -60,33 +60,50 @@ class ParakeetModel:
     def reset_state(self) -> InferState:
         return InferState()
 
+    def transcribe_window(self, audio: np.ndarray) -> str:
+        """Stateless re-decode of a PCM window; returns the transcript.
+
+        Parakeet TDT via NeMo does not expose a stable per-chunk streaming step
+        for all checkpoints, so we re-decode the (bounded) cumulative utterance
+        window each call. The caller owns the audio buffer; this method keeps no
+        audio state of its own, which is what avoids double-counting.
+        """
+        if audio is None or audio.shape[0] == 0:
+            return ""
+        if audio.dtype != np.float32:
+            audio = audio.astype(np.float32)
+        # Bound the window so latency does not grow without limit on long utterances.
+        if audio.shape[0] > _FALLBACK_CONTEXT_SAMPLES:
+            audio = audio[-_FALLBACK_CONTEXT_SAMPLES:]
+        return self._run_transcribe(audio)
+
     def transcribe_chunk(
-        self, audio_chunk: np.ndarray, state: Optional[InferState]
+        self, audio_window: np.ndarray, state: Optional[InferState]
     ) -> Tuple[str, InferState]:
-        """Run incremental transcription on one PCM chunk; returns (cumulative_text, new_state)."""
+        """Re-decode the current utterance window; returns (cumulative_text, new_state).
+
+        ``audio_window`` is the full cumulative PCM for the utterance so far — the
+        caller (ws session) owns that buffer. We re-decode it rather than appending
+        to per-chunk state, so audio the caller has already buffered is never
+        counted twice. The GPU lock in ``_run_transcribe`` serializes device work.
+        """
         if state is None:
             state = self.reset_state()
-
-        if audio_chunk.dtype != np.float32:
-            audio_chunk = audio_chunk.astype(np.float32)
-
-        # Append to rolling buffer; we always re-decode the buffer because Parakeet TDT
-        # via NeMo 2.0.0 does not expose a stable per-chunk streaming step for all checkpoints.
-        # The lock keeps GPU access serialized; concurrency is achieved across sessions by queueing.
-        state.audio = np.concatenate([state.audio, audio_chunk])
-        # Trim to a bounded sliding window so latency does not grow without bound
-        if state.audio.shape[0] > _FALLBACK_CONTEXT_SAMPLES:
-            state.audio = state.audio[-_FALLBACK_CONTEXT_SAMPLES:]
-
-        text = self._run_transcribe(state.audio)
+        text = self.transcribe_window(audio_window)
         state.last_text = text
         return text, state
 
     def finalize(self, state: InferState) -> str:
-        """Final flush — return best hypothesis on whatever audio is buffered."""
-        if state is None or state.audio.shape[0] == 0:
-            return state.last_text if state else ""
-        return self._run_transcribe(state.audio)
+        """Final flush — best hypothesis on the last decoded window.
+
+        Prefer :meth:`transcribe_window` on the caller's live buffer; this is kept
+        for callers that only hold the opaque state.
+        """
+        if state is None:
+            return ""
+        if state.audio.shape[0] == 0:
+            return state.last_text
+        return self.transcribe_window(state.audio)
 
     def warm_up(self) -> None:
         """One dummy transcribe over 1 s of silence to compile kernels."""
@@ -98,17 +115,51 @@ class ParakeetModel:
         except Exception:
             logger.exception("Warm-up failed (continuing)")
 
+    def _bound(self, audio: np.ndarray) -> Optional[np.ndarray]:
+        if audio is None or audio.shape[0] == 0:
+            return None
+        if audio.dtype != np.float32:
+            audio = audio.astype(np.float32)
+        if audio.shape[0] > _FALLBACK_CONTEXT_SAMPLES:
+            audio = audio[-_FALLBACK_CONTEXT_SAMPLES:]
+        return audio
+
+    def try_transcribe_window(self, audio: np.ndarray) -> Optional[str]:
+        """Best-effort partial decode: returns the transcript, or ``None`` if the
+        GPU is already busy.
+
+        Each NeMo ``transcribe`` call costs a fixed ~55 ms (Python/dataloader
+        overhead, independent of window length), so the lock-serialized model
+        caps out around ~18 calls/s. Partials are disposable — if we blocked
+        here, ticks from many concurrent sessions would queue without bound and
+        starve the event loop (uvicorn's WS keepalive then drops the socket).
+        Skipping a busy tick keeps the loop responsive; the next frame retries.
+        """
+        bounded = self._bound(audio)
+        if bounded is None:
+            return ""
+        if not self._lock.acquire(blocking=False):
+            return None
+        try:
+            return self._infer(bounded)
+        finally:
+            self._lock.release()
+
     def _run_transcribe(self, audio: np.ndarray) -> str:
-        """Underlying NeMo call. Holds the GPU lock for the duration."""
+        """Underlying NeMo call. Holds the GPU lock for the duration (blocking)."""
+        with self._lock:
+            return self._infer(audio)
+
+    def _infer(self, audio: np.ndarray) -> str:
+        """Run NeMo transcribe on one window. Caller must hold ``self._lock``."""
         import torch
 
-        with self._lock:
-            with torch.inference_mode():
-                # NeMo 2.0 transcribe accepts a list of numpy arrays in newer builds
-                try:
-                    out = self.model.transcribe([audio], batch_size=1, verbose=False)
-                except TypeError:
-                    out = self.model.transcribe([audio], batch_size=1)
+        with torch.inference_mode():
+            # NeMo 2.0 transcribe accepts a list of numpy arrays in newer builds
+            try:
+                out = self.model.transcribe([audio], batch_size=1, verbose=False)
+            except TypeError:
+                out = self.model.transcribe([audio], batch_size=1)
         return _extract_text(out)
 
 
