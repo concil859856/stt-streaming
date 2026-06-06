@@ -12,19 +12,20 @@ See [`stt-streaming-implementation.md`](../stt-streaming-implementation.md) for 
 # 1. Build
 docker build -t vocence/stt-streaming:dev .
 
-# 2. Run on a CUDA-capable GPU
-docker run --rm --gpus all -p 8114:8114 \
+# 2. Run on a CUDA-capable GPU (serves on 8117 by default)
+docker run --rm --gpus all -p 8117:8117 \
   -e ASR_API_KEY=test_key_local_only \
   vocence/stt-streaming:dev
 
 # 3. Smoke test
 python scripts/smoke_test.py \
-  --url ws://localhost:8114/v1/stream \
+  --url ws://localhost:8117/v1/stream \
   --api-key test_key_local_only \
-  --wav tests/fixtures/librispeech_short.wav
+  --wav tests/fixtures/jfk.wav
 ```
 
-Expected: at least one `partial`, one `final` with the known transcript, clean close (1000).
+Expected: streaming `partial`s, one or more `final`s ("And so, my fellow Americans...
+ask what you can do for your country."), clean close (1000).
 
 ## Endpoints
 

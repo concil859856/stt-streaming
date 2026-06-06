@@ -163,7 +163,7 @@ async def handle_session(
         await _send_json(websocket, {
             "type": "ready",
             "session_id": sess.session_id,
-            "model": getattr(config, "model_name", model.model_dir),
+            "model": getattr(config, "model_name", None) or getattr(config, "model", None) or model.model_dir,
             "language": sess.language,
             "sample_rate": sess.sample_rate,
         })
