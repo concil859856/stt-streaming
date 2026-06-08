@@ -46,7 +46,9 @@ VOLUME ["/cache/models", "/cache/hf"]
 EXPOSE 8117
 
 # Longer start-period covers first-boot model download (~3 GB).
+# /healthz requires the API key (same as every endpoint), so the probe must
+# send it — otherwise it gets 401 and the container is wrongly marked unhealthy.
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 --start-period=300s \
-    CMD curl -fsS http://localhost:8117/healthz | grep -q '"status":"ok"'
+    CMD curl -fsS -H "X-API-Key: $ASR_API_KEY" http://localhost:8117/healthz | grep -q '"status":"ok"'
 
 CMD ["stt-streaming"]
