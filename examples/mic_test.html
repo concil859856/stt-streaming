@@ -56,11 +56,11 @@
 
   <div class="row">
     <label for="url">WS URL</label>
-    <input id="url" value="ws://localhost:8117/v1/stream" />
+    <input id="url" value="" />
   </div>
   <div class="row">
     <label for="key">API key</label>
-    <input id="key" type="password" placeholder="X-API-Key for the pod" />
+    <input id="key" type="password" placeholder="(leave blank when using mic_proxy.py)" />
   </div>
   <div class="row">
     <button id="start">Start</button>
@@ -125,13 +125,15 @@ function onAudioFrame(f32, inRate) {
 async function start() {
   const url = $("url").value.trim();
   const key = $("key").value.trim();
-  if (!key) { alert("Enter the API key first."); return; }
+  if (!url) { alert("WS URL is empty."); return; }
   startBtn.disabled = true;
   finalSoFar = ""; finalEl.textContent = ""; interimEl.textContent = "";
   pcmQueue = []; resampPos = 0;
 
-  // 1) open the WebSocket (key as query param — browsers can't set WS headers)
-  const wsUrl = url + (url.includes("?") ? "&" : "?") + "api_key=" + encodeURIComponent(key);
+  // 1) open the WebSocket. With mic_proxy.py the key is injected server-side, so
+  //    it's optional here; if provided we pass it as ?api_key= (browsers can't
+  //    set WS headers).
+  const wsUrl = key ? url + (url.includes("?") ? "&" : "?") + "api_key=" + encodeURIComponent(key) : url;
   setStatus("connecting…");
   ws = new WebSocket(wsUrl);
   ws.binaryType = "arraybuffer";
@@ -211,6 +213,21 @@ function cleanup() {
   startBtn.disabled = false; stopBtn.disabled = true;
   setStatus("idle", false);
 }
+
+// Default the WS URL to the same origin that served this page, so when it's
+// served by mic_proxy.py the WebSocket rides the same (forwarded) port —
+// no second port, no key needed. Falls back to the pod's default if opened
+// from a file:// URL.
+(function () {
+  const u = $("url");
+  if (!u.value) {
+    if (location.host) {
+      u.value = (location.protocol === "https:" ? "wss:" : "ws:") + "//" + location.host + "/v1/stream";
+    } else {
+      u.value = "ws://localhost:8117/v1/stream";
+    }
+  }
+})();
 
 startBtn.onclick = start;
 stopBtn.onclick = stop;
