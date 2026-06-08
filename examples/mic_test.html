@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<!--
+  Browser mic test for stt-streaming /v1/stream.
+
+  Captures the microphone, downsamples to 16 kHz mono PCM16, streams it to the
+  WebSocket endpoint, and shows partial (interim) + final captions in real time.
+
+  How to run (the page must be served over http://localhost so the browser
+  grants mic access — opening the file directly will NOT get a mic):
+
+    # on the box running the pod (or anywhere it can reach the WS):
+    python3 -m http.server 8080 --directory examples
+
+    # from your laptop, forward the page port and the STT port, then open it:
+    ssh -L 8080:localhost:8080 -L 8117:localhost:8117 <user>@<box>
+    # browser ->  http://localhost:8080/mic_test.html
+
+  Then paste the pod's API key, click "Start", and talk.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>stt-streaming · mic test</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+         max-width: 820px; margin: 32px auto; padding: 0 16px; line-height: 1.5; }
+  h1 { font-size: 1.3rem; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+  label { font-size: .85rem; opacity: .8; min-width: 70px; }
+  input { flex: 1; min-width: 240px; padding: 8px 10px; border: 1px solid #8888; border-radius: 8px;
+          font: inherit; background: transparent; color: inherit; }
+  button { padding: 10px 18px; border: 0; border-radius: 8px; font: inherit; font-weight: 600;
+           cursor: pointer; }
+  #start { background: #1f883d; color: #fff; }
+  #stop  { background: #cf222e; color: #fff; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  #status { font-size: .85rem; padding: 6px 10px; border-radius: 8px; background: #8881; }
+  #dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #999;
+         margin-right: 6px; vertical-align: middle; }
+  .live #dot { background: #1f883d; animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+  #caption { margin-top: 16px; padding: 18px; min-height: 180px; border: 1px solid #8884;
+             border-radius: 12px; font-size: 1.25rem; }
+  .final { }
+  .interim { opacity: .55; font-style: italic; }
+  #log { margin-top: 14px; font-size: .75rem; opacity: .7; white-space: pre-wrap;
+         max-height: 140px; overflow: auto; }
+  .meter { height: 6px; border-radius: 3px; background: #8883; overflow: hidden; margin-top: 6px; }
+  .meter > div { height: 100%; width: 0; background: #1f883d; transition: width .05s; }
+</style>
+</head>
+<body>
+  <h1>🎙️ stt-streaming — live mic test</h1>
+
+  <div class="row">
+    <label for="url">WS URL</label>
+    <input id="url" value="ws://localhost:8117/v1/stream" />
+  </div>
+  <div class="row">
+    <label for="key">API key</label>
+    <input id="key" type="password" placeholder="X-API-Key for the pod" />
+  </div>
+  <div class="row">
+    <button id="start">Start</button>
+    <button id="stop" disabled>Stop</button>
+    <span id="status"><span id="dot"></span><span id="statusText">idle</span></span>
+  </div>
+  <div class="meter"><div id="level"></div></div>
+
+  <div id="caption"><span class="final" id="finalText"></span><span class="interim" id="interimText"></span></div>
+  <div id="log"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const startBtn = $("start"), stopBtn = $("stop");
+const finalEl = $("finalText"), interimEl = $("interimText");
+const statusText = $("statusText"), statusBox = $("status"), levelEl = $("level");
+
+const TARGET_SR = 16000;
+const FRAME_SAMPLES = 320; // 20 ms @ 16 kHz
+
+let ws, audioCtx, micStream, workletNode, sourceNode;
+let pcmQueue = [];          // pending Int16 samples to ship as frames
+let resampPos = 0;          // fractional read cursor for downsampling
+let finalSoFar = "";
+
+function log(msg) {
+  const el = $("log");
+  el.textContent += msg + "\n";
+  el.scrollTop = el.scrollHeight;
+}
+function setStatus(text, live) {
+  statusText.textContent = text;
+  statusBox.parentElement; // noop
+  document.body.classList.toggle("live", !!live);
+}
+
+// ---- audio: float32 @ ctx rate -> int16 @ 16 kHz, framed, sent as WS binary ----
+function pushSample(f) {
+  let s = Math.max(-1, Math.min(1, f));
+  pcmQueue.push(s < 0 ? s * 0x8000 : s * 0x7fff);
+}
+function onAudioFrame(f32, inRate) {
+  if (inRate === TARGET_SR) {
+    for (let i = 0; i < f32.length; i++) pushSample(f32[i]);
+  } else {
+    const ratio = inRate / TARGET_SR;
+    while (resampPos < f32.length) {
+      const idx = Math.floor(resampPos), frac = resampPos - idx;
+      const a = f32[idx], b = idx + 1 < f32.length ? f32[idx + 1] : f32[idx];
+      pushSample(a + (b - a) * frac);
+      resampPos += ratio;
+    }
+    resampPos -= f32.length;
+  }
+  // ship whole 20 ms frames
+  while (pcmQueue.length >= FRAME_SAMPLES) {
+    const frame = Int16Array.from(pcmQueue.splice(0, FRAME_SAMPLES));
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(frame.buffer);
+  }
+}
+
+async function start() {
+  const url = $("url").value.trim();
+  const key = $("key").value.trim();
+  if (!key) { alert("Enter the API key first."); return; }
+  startBtn.disabled = true;
+  finalSoFar = ""; finalEl.textContent = ""; interimEl.textContent = "";
+  pcmQueue = []; resampPos = 0;
+
+  // 1) open the WebSocket (key as query param — browsers can't set WS headers)
+  const wsUrl = url + (url.includes("?") ? "&" : "?") + "api_key=" + encodeURIComponent(key);
+  setStatus("connecting…");
+  ws = new WebSocket(wsUrl);
+  ws.binaryType = "arraybuffer";
+
+  ws.onopen = () => {
+    log("ws open");
+    ws.send(JSON.stringify({ type: "start", language: "auto",
+      sample_rate: TARGET_SR, encoding: "pcm_s16le", enable_partials: true }));
+  };
+  ws.onmessage = (ev) => {
+    if (typeof ev.data !== "string") return;
+    const m = JSON.parse(ev.data);
+    if (m.type === "ready") { setStatus("listening — talk!", true); stopBtn.disabled = false; beginCapture(); }
+    else if (m.type === "partial") { interimEl.textContent = (finalSoFar ? " " : "") + m.text; }
+    else if (m.type === "final") {
+      if (m.text) finalSoFar += (finalSoFar ? " " : "") + m.text;
+      finalEl.textContent = finalSoFar;
+      interimEl.textContent = "";
+    }
+    else if (m.type === "error") { log("server error: " + m.code + " " + m.message); }
+  };
+  ws.onclose = (ev) => { log("ws closed " + ev.code); cleanup(); };
+  ws.onerror = () => { log("ws error (check URL/key/port-forward)"); };
+}
+
+async function beginCapture() {
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+  } catch (e) { log("mic denied: " + e); stop(); return; }
+
+  // Ask for a 16 kHz context; if the browser ignores it we resample in onAudioFrame.
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_SR });
+  const inRate = audioCtx.sampleRate;
+  log("audio context sample rate: " + inRate + (inRate === TARGET_SR ? "" : " (will resample)"));
+
+  const workletCode = `
+    class Capture extends AudioWorkletProcessor {
+      process(inputs) {
+        const ch = inputs[0][0];
+        if (ch) this.port.postMessage(ch.slice(0));
+        return true;
+      }
+    }
+    registerProcessor('capture', Capture);`;
+  const blobUrl = URL.createObjectURL(new Blob([workletCode], { type: "application/javascript" }));
+  await audioCtx.audioWorklet.addModule(blobUrl);
+
+  sourceNode = audioCtx.createMediaStreamSource(micStream);
+  workletNode = new AudioWorkletNode(audioCtx, "capture");
+  workletNode.port.onmessage = (e) => {
+    const f32 = e.data;
+    // simple level meter
+    let peak = 0; for (let i = 0; i < f32.length; i++) { const a = Math.abs(f32[i]); if (a > peak) peak = a; }
+    levelEl.style.width = Math.min(100, peak * 140) + "%";
+    onAudioFrame(f32, inRate);
+  };
+  sourceNode.connect(workletNode);
+  // intentionally not connecting to destination (no mic playback)
+}
+
+function stop() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try { ws.send(JSON.stringify({ type: "close" })); } catch (e) {}
+  }
+  setStatus("stopping…");
+  stopBtn.disabled = true;
+}
+
+function cleanup() {
+  try { workletNode && workletNode.disconnect(); } catch (e) {}
+  try { sourceNode && sourceNode.disconnect(); } catch (e) {}
+  try { micStream && micStream.getTracks().forEach((t) => t.stop()); } catch (e) {}
+  try { audioCtx && audioCtx.close(); } catch (e) {}
+  levelEl.style.width = "0";
+  startBtn.disabled = false; stopBtn.disabled = true;
+  setStatus("idle", false);
+}
+
+startBtn.onclick = start;
+stopBtn.onclick = stop;
+</script>
+</body>
+</html>
