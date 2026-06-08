@@ -22,7 +22,31 @@ from starlette.routing import Route, WebSocketRoute
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BACKEND = os.environ.get("STT_BACKEND", "ws://localhost:8117/v1/stream")
-API_KEY = os.environ.get("STT_API_KEY", "")
+
+
+def _resolve_api_key() -> str:
+    """Use STT_API_KEY if set; otherwise read ASR_API_KEY straight out of the
+    running pod container so you don't have to handle the secret yourself."""
+    key = os.environ.get("STT_API_KEY", "")
+    if key:
+        return key
+    import subprocess
+    container = os.environ.get("STT_CONTAINER", "vocence-asr_streaming_rt-6")
+    try:
+        out = subprocess.run(
+            ["docker", "inspect", container,
+             "--format", "{{range .Config.Env}}{{println .}}{{end}}"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout
+        for line in out.splitlines():
+            if line.startswith("ASR_API_KEY="):
+                return line.split("=", 1)[1]
+    except Exception:
+        pass
+    return ""
+
+
+API_KEY = _resolve_api_key()
 
 
 async def index(request):
@@ -78,7 +102,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--port", type=int, default=8080)
     args = p.parse_args()
-    uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="warning")
+    uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="info", access_log=True)
 
 
 if __name__ == "__main__":
